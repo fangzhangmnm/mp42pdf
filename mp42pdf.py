@@ -22,7 +22,7 @@ JPEG_QUALITY = 95
 RETRY_FRAMES = 3
 DEFAULT_N_COLS = 4
 DEFAULT_N_ROWS = 10
-CELL_WIDTH = 240
+CELL_WIDTH = 720
 PAGE_GAP = 8
 PAGE_BG = 255
 
@@ -125,9 +125,14 @@ def read_selected_frame(
     return False, last_candidate, None
 
 
-def make_page(frame: np.ndarray, n_cols: int, n_rows: int) -> tuple[np.ndarray, int, int]:
+def make_page(
+    frame: np.ndarray,
+    n_cols: int,
+    n_rows: int,
+    cell_width: int,
+) -> tuple[np.ndarray, int, int]:
     frame_height, frame_width = frame.shape[:2]
-    cell_width = CELL_WIDTH
+    cell_width = min(cell_width, frame_width)
     cell_height = max(1, round(cell_width * frame_height / frame_width))
     page_width = (n_cols * cell_width) + ((n_cols + 1) * PAGE_GAP)
     page_height = (n_rows * cell_height) + ((n_rows + 1) * PAGE_GAP)
@@ -240,6 +245,7 @@ def process_video(
     max_len: float | None = None,
     n_cols: int = DEFAULT_N_COLS,
     n_rows: int = DEFAULT_N_ROWS,
+    cell_width: int = CELL_WIDTH,
     show_detect_progress: bool = False,
     show_build_progress: bool = False,
     progress: ProgressCallback | None = None,
@@ -248,8 +254,8 @@ def process_video(
     video = video.expanduser().resolve()
     output = normalize_output_path(video, output)
 
-    if n_cols < 1 or n_rows < 1:
-        raise AppError("n_cols and n_rows must be >= 1")
+    if n_cols < 1 or n_rows < 1 or cell_width < 1:
+        raise AppError("n_cols, n_rows, and cell_width must be >= 1")
     if not video.is_file():
         raise AppError(f"missing video: {video}")
     if output.exists() and output.is_dir():
@@ -269,7 +275,7 @@ def process_video(
     skipped = 0
     pages: list[bytes] = []
     page = None
-    cell_width = 0
+    cell_width_px = 0
     cell_height = 0
     slots_per_page = n_cols * n_rows
     slot_index = 0
@@ -284,8 +290,13 @@ def process_video(
             ok, actual_frame, frame = read_selected_frame(capture, frame_number)
             if ok and frame is not None:
                 if page is None:
-                    page, cell_width, cell_height = make_page(frame, n_cols, n_rows)
-                place_frame(page, frame, slot_index, n_cols, cell_width, cell_height)
+                    page, cell_width_px, cell_height = make_page(
+                        frame,
+                        n_cols,
+                        n_rows,
+                        cell_width,
+                    )
+                place_frame(page, frame, slot_index, n_cols, cell_width_px, cell_height)
                 slot_index += 1
                 if slot_index == slots_per_page:
                     pages.append(encode_page(page))
@@ -338,6 +349,7 @@ def launch_ui() -> int:
     max_len_var = tk.StringVar()
     n_cols_var = tk.StringVar(value=str(DEFAULT_N_COLS))
     n_rows_var = tk.StringVar(value=str(DEFAULT_N_ROWS))
+    cell_width_var = tk.StringVar(value=str(CELL_WIDTH))
     status_var = tk.StringVar(value="Choose a video to begin.")
     event_queue: queue.Queue = queue.Queue()
 
@@ -390,6 +402,7 @@ def launch_ui() -> int:
                 max_len=max_len,
                 n_cols=int(n_cols_var.get()),
                 n_rows=int(n_rows_var.get()),
+                cell_width=int(cell_width_var.get()),
                 progress=lambda phase, current, total: event_queue.put(
                     ("progress", phase, current, total)
                 ),
@@ -464,6 +477,12 @@ def launch_ui() -> int:
     n_rows_entry = ttk.Entry(frame, width=8, textvariable=n_rows_var)
     n_rows_entry.grid(row=5, column=0, sticky="w", padx=(210, 0))
 
+    ttk.Label(frame, text="cell_width").grid(
+        row=4, column=0, sticky="w", padx=(300, 0), pady=(10, 0)
+    )
+    cell_width_entry = ttk.Entry(frame, width=8, textvariable=cell_width_var)
+    cell_width_entry.grid(row=5, column=0, sticky="w", padx=(300, 0))
+
     progress = ttk.Progressbar(frame, length=360, mode="determinate")
     progress.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 6))
     ttk.Label(frame, textvariable=status_var).grid(row=7, column=0, columnspan=2, sticky="w")
@@ -479,6 +498,7 @@ def launch_ui() -> int:
         max_len_entry,
         n_cols_entry,
         n_rows_entry,
+        cell_width_entry,
         start_button,
     ]
 
@@ -509,6 +529,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--n_cols", type=int, default=DEFAULT_N_COLS, help="Images per row.")
     parser.add_argument("--n_rows", type=int, default=DEFAULT_N_ROWS, help="Rows per PDF page.")
+    parser.add_argument(
+        "--cell_width",
+        type=int,
+        default=CELL_WIDTH,
+        help="Maximum width of each image cell in pixels.",
+    )
     return parser.parse_args(argv)
 
 
@@ -520,6 +546,7 @@ def run_cli(args: argparse.Namespace) -> int:
             max_len=args.max_len,
             n_cols=args.n_cols,
             n_rows=args.n_rows,
+            cell_width=args.cell_width,
             show_detect_progress=True,
             show_build_progress=True,
         )
