@@ -22,9 +22,10 @@ JPEG_QUALITY = 95
 RETRY_FRAMES = 3
 DEFAULT_N_COLS = 4
 DEFAULT_N_ROWS = 10
-CELL_WIDTH = 720
+CELL_WIDTH = 480
 PAGE_GAP = 8
 PAGE_BG = 255
+PDF_PAGE_MM = (210, 297)
 
 
 class AppError(Exception):
@@ -174,8 +175,13 @@ def encode_page(page: np.ndarray) -> bytes:
 
 
 def write_pdf(output: Path, pages: list[bytes], img2pdf) -> None:
+    layout_fun = img2pdf.get_layout_fun(
+        pagesize=tuple(img2pdf.mm_to_pt(length) for length in PDF_PAGE_MM),
+        fit=img2pdf.FitMode.into,
+        auto_orient=True,
+    )
     with output.open("wb") as handle:
-        img2pdf.convert(*pages, outputstream=handle)
+        img2pdf.convert(*pages, outputstream=handle, layout_fun=layout_fun)
 
 
 def detect_scene_list(
