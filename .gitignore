@@ -32,6 +32,10 @@ MANIFEST
 *.manifest
 *.spec
 
+# Local app release artifacts
+release/
+*.exe
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
