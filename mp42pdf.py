@@ -18,35 +18,32 @@ RETRY_FRAMES = 3
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Detect anime shots and save one JPG per scene."
+        description="Detect anime shots and build a PDF from in-memory JPG pages."
     )
     parser.add_argument("video", type=Path, help="Input MP4/video file.")
+    parser.add_argument("output", type=Path, help="Output PDF path.")
     parser.add_argument(
-        "output",
-        type=Path,
-        help="Output PDF name for now; its stem is used as the JPG folder name.",
-    )
-    parser.add_argument(
-        "--max-len",
+        "--max_len",
         type=float,
         help="Debug limit in seconds: only detect scenes in the first N seconds.",
     )
     return parser.parse_args()
 
 
-def output_dir(target: Path) -> Path:
-    return target.with_suffix("") if target.suffix else target
+def load_img2pdf():
+    try:
+        import img2pdf
+    except ModuleNotFoundError:
+        print(
+            "missing dependency: img2pdf\n"
+            "install it with: python -m pip install img2pdf",
+            file=sys.stderr,
+        )
+        return None
+    return img2pdf
 
 
-def stamp(seconds: float) -> str:
-    ms = int(round(seconds * 1000))
-    h, ms = divmod(ms, 3_600_000)
-    m, ms = divmod(ms, 60_000)
-    s, ms = divmod(ms, 1000)
-    return f"{h:02d}-{m:02d}-{s:02d}-{ms:03d}"
-
-
-def pick_frame(start, end) -> tuple[int, float]:
+def pick_frame(start, end) -> int:
     fps = start.get_framerate()
     start_frame = start.get_frames()
     end_frame = end.get_frames()
@@ -55,8 +52,7 @@ def pick_frame(start, end) -> tuple[int, float]:
     target_frame = start_frame + round(CAPTURE_OFFSET_SEC * fps)
     if target_frame >= end_frame - round(TAIL_GUARD_SEC * fps):
         target_frame = start_frame + ((last_frame - start_frame) // 2)
-    target_frame = max(start_frame, min(target_frame, last_frame))
-    return target_frame, target_frame / fps
+    return max(start_frame, min(target_frame, last_frame))
 
 
 def open_capture(video: Path) -> cv2.VideoCapture:
@@ -72,7 +68,7 @@ def read_frame(capture: cv2.VideoCapture, frame_number: int):
     return ok, frame
 
 
-def save_jpg(capture: cv2.VideoCapture, frame_number: int, jpg: Path) -> tuple[bool, int]:
+def encode_jpg(capture: cv2.VideoCapture, frame_number: int) -> tuple[bool, int, bytes | None]:
     last_candidate = frame_number
     for offset in range(RETRY_FRAMES + 1):
         candidate = frame_number + offset
@@ -80,29 +76,37 @@ def save_jpg(capture: cv2.VideoCapture, frame_number: int, jpg: Path) -> tuple[b
         ok, frame = read_frame(capture, candidate)
         if not ok or frame is None:
             continue
-        written = cv2.imwrite(
-            str(jpg),
+        ok, encoded = cv2.imencode(
+            ".jpg",
             frame,
             [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
         )
-        if written:
-            return True, candidate
-    return False, last_candidate
+        if ok:
+            return True, candidate, encoded.tobytes()
+    return False, last_candidate, None
+
+
+def write_pdf(output: Path, pages: list[bytes], img2pdf) -> None:
+    with output.open("wb") as handle:
+        img2pdf.convert(*pages, outputstream=handle)
 
 
 def main() -> int:
     args = parse_args()
     video = args.video.expanduser().resolve()
-    out = output_dir(args.output.expanduser().resolve())
+    output = args.output.expanduser().resolve()
+    img2pdf = load_img2pdf()
+    if img2pdf is None:
+        return 1
 
     if not video.is_file():
         print(f"missing video: {video}", file=sys.stderr)
         return 1
-    if out.exists() and not out.is_dir():
-        print(f"output exists and is not a folder: {out}", file=sys.stderr)
+    if output.exists() and output.is_dir():
+        print(f"output exists and is a folder: {output}", file=sys.stderr)
         return 1
 
-    out.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     scenes = detect(
         str(video),
         AdaptiveDetector(
@@ -126,27 +130,40 @@ def main() -> int:
         return 1
 
     skipped = []
-    for i, (start, end) in enumerate(tqdm(scenes, desc="Saving JPGs"), start=1):
-        frame_number, seconds = pick_frame(start, end)
-        ok, actual_frame = save_jpg(
-            capture,
-            frame_number,
-            out / f"{i:04d}_{stamp(seconds)}.jpg",
-        )
-        if not ok:
+    pages = []
+    try:
+        for i, (start, end) in enumerate(
+            tqdm(scenes, desc="Encoding PDF pages"),
+            start=1,
+        ):
+            frame_number = pick_frame(start, end)
+            ok, actual_frame, page = encode_jpg(capture, frame_number)
+            if ok and page is not None:
+                pages.append(page)
+                continue
             skipped.append((i, frame_number))
             print(
                 f"skipping shot {i}: could not read frame {frame_number}"
                 f" or nearby frames up to {actual_frame}",
                 file=sys.stderr,
             )
+    finally:
+        capture.release()
 
-    capture.release()
+    if not pages:
+        print("no PDF pages could be encoded", file=sys.stderr)
+        return 3
+
+    try:
+        write_pdf(output, pages, img2pdf)
+    except Exception as exc:
+        print(f"failed to write PDF: {exc}", file=sys.stderr)
+        return 1
 
     if skipped:
         print(f"skipped {len(skipped)} shots", file=sys.stderr)
 
-    print(out)
+    print(output)
     return 0
 
 
