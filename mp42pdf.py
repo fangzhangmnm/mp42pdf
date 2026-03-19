@@ -13,11 +13,12 @@ from scenedetect import AdaptiveDetector, SceneManager, open_video
 from scenedetect.frame_timecode import FrameTimecode
 from tqdm import tqdm
 
-MIN_SCENE_LEN = 12
-ADAPTIVE_THRESHOLD = 3.0
+MIN_SCENE_LEN_SEC = 0.5
+ADAPTIVE_THRESHOLD = 2.0
 MIN_CONTENT_VAL = 15.0
 CAPTURE_OFFSET_SEC = 0.25
 TAIL_GUARD_SEC = 0.10
+CAPTURE_POSITION = 0.3
 JPEG_QUALITY = 95
 RETRY_FRAMES = 3
 DEFAULT_N_COLS = 4
@@ -74,7 +75,7 @@ def normalize_output_path(video: Path, output: Path | None) -> Path:
     return output.resolve()
 
 
-def pick_frame(start, end) -> int:
+def pick_frame(start, end, capture_position: float = CAPTURE_POSITION) -> int:
     fps = start.get_framerate()
     start_frame = start.get_frames()
     end_frame = end.get_frames()
@@ -95,7 +96,9 @@ def pick_frame(start, end) -> int:
     if safe_start > safe_end:
         safe_start = safe_end = start_frame + ((last_frame - start_frame) // 2)
 
-    return max(start_frame, min(safe_start, last_frame))
+    lerp = min(1.0, max(0.0, capture_position))
+    picked = round(safe_start + ((safe_end - safe_start) * lerp))
+    return max(start_frame, min(picked, last_frame))
 
 
 def open_capture(video: Path) -> cv2.VideoCapture:
@@ -188,16 +191,20 @@ def detect_scene_list(
     video_path: Path,
     *,
     max_len: float | None = None,
+    min_scene_len: float = MIN_SCENE_LEN_SEC,
+    adaptive_threshold: float = ADAPTIVE_THRESHOLD,
+    min_content_val: float = MIN_CONTENT_VAL,
     show_progress: bool = False,
     progress: ProgressCallback | None = None,
 ):
     video = open_video(str(video_path))
     manager = SceneManager()
+    min_scene_len_frames = max(1, round(min_scene_len * video.frame_rate))
     manager.add_detector(
         AdaptiveDetector(
-            adaptive_threshold=ADAPTIVE_THRESHOLD,
-            min_scene_len=MIN_SCENE_LEN,
-            min_content_val=MIN_CONTENT_VAL,
+            adaptive_threshold=adaptive_threshold,
+            min_scene_len=min_scene_len_frames,
+            min_content_val=min_content_val,
         )
     )
 
@@ -249,6 +256,10 @@ def process_video(
     output: Path | None = None,
     *,
     max_len: float | None = None,
+    min_scene_len: float = MIN_SCENE_LEN_SEC,
+    adaptive_threshold: float = ADAPTIVE_THRESHOLD,
+    min_content_val: float = MIN_CONTENT_VAL,
+    capture_position: float = CAPTURE_POSITION,
     n_cols: int = DEFAULT_N_COLS,
     n_rows: int = DEFAULT_N_ROWS,
     cell_width: int = CELL_WIDTH,
@@ -260,6 +271,10 @@ def process_video(
     video = video.expanduser().resolve()
     output = normalize_output_path(video, output)
 
+    if min_scene_len < 0 or adaptive_threshold < 0 or min_content_val < 0:
+        raise AppError("min_scene_len, adaptive_threshold, and min_content_val must be >= 0")
+    if not 0 <= capture_position <= 1:
+        raise AppError("capture_position must be between 0 and 1")
     if n_cols < 1 or n_rows < 1 or cell_width < 1:
         raise AppError("n_cols, n_rows, and cell_width must be >= 1")
     if not video.is_file():
@@ -271,6 +286,9 @@ def process_video(
     scenes = detect_scene_list(
         video,
         max_len=max_len,
+        min_scene_len=min_scene_len,
+        adaptive_threshold=adaptive_threshold,
+        min_content_val=min_content_val,
         show_progress=show_detect_progress,
         progress=progress,
     )
@@ -292,7 +310,7 @@ def process_video(
         if progress:
             progress("Building PDF...", 0, total)
         for i, (start, end) in enumerate(iterator, start=1):
-            frame_number = pick_frame(start, end)
+            frame_number = pick_frame(start, end, capture_position=capture_position)
             ok, actual_frame, frame = read_selected_frame(capture, frame_number)
             if ok and frame is not None:
                 if page is None:
@@ -353,6 +371,10 @@ def launch_ui() -> int:
     video_var = tk.StringVar()
     output_var = tk.StringVar()
     max_len_var = tk.StringVar()
+    min_scene_len_var = tk.StringVar(value=str(MIN_SCENE_LEN_SEC))
+    adaptive_threshold_var = tk.StringVar(value=str(ADAPTIVE_THRESHOLD))
+    min_content_val_var = tk.StringVar(value=str(MIN_CONTENT_VAL))
+    capture_position_var = tk.StringVar(value=str(CAPTURE_POSITION))
     n_cols_var = tk.StringVar(value=str(DEFAULT_N_COLS))
     n_rows_var = tk.StringVar(value=str(DEFAULT_N_ROWS))
     cell_width_var = tk.StringVar(value=str(CELL_WIDTH))
@@ -406,6 +428,10 @@ def launch_ui() -> int:
                 Path(video_var.get()),
                 Path(output_var.get()) if output_var.get().strip() else None,
                 max_len=max_len,
+                min_scene_len=float(min_scene_len_var.get()),
+                adaptive_threshold=float(adaptive_threshold_var.get()),
+                min_content_val=float(min_content_val_var.get()),
+                capture_position=float(capture_position_var.get()),
                 n_cols=int(n_cols_var.get()),
                 n_rows=int(n_rows_var.get()),
                 cell_width=int(cell_width_var.get()),
@@ -489,12 +515,38 @@ def launch_ui() -> int:
     cell_width_entry = ttk.Entry(frame, width=8, textvariable=cell_width_var)
     cell_width_entry.grid(row=5, column=0, sticky="w", padx=(300, 0))
 
+    ttk.Label(frame, text="min_scene_len").grid(row=6, column=0, sticky="w", pady=(10, 0))
+    min_scene_len_entry = ttk.Entry(frame, width=12, textvariable=min_scene_len_var)
+    min_scene_len_entry.grid(row=7, column=0, sticky="w")
+
+    ttk.Label(frame, text="adaptive_threshold").grid(
+        row=6, column=0, sticky="w", padx=(120, 0), pady=(10, 0)
+    )
+    adaptive_threshold_entry = ttk.Entry(
+        frame,
+        width=12,
+        textvariable=adaptive_threshold_var,
+    )
+    adaptive_threshold_entry.grid(row=7, column=0, sticky="w", padx=(120, 0))
+
+    ttk.Label(frame, text="min_content_val").grid(
+        row=6, column=0, sticky="w", padx=(280, 0), pady=(10, 0)
+    )
+    min_content_val_entry = ttk.Entry(frame, width=12, textvariable=min_content_val_var)
+    min_content_val_entry.grid(row=7, column=0, sticky="w", padx=(280, 0))
+
+    ttk.Label(frame, text="capture_position").grid(
+        row=6, column=0, sticky="w", padx=(440, 0), pady=(10, 0)
+    )
+    capture_position_entry = ttk.Entry(frame, width=12, textvariable=capture_position_var)
+    capture_position_entry.grid(row=7, column=0, sticky="w", padx=(440, 0))
+
     progress = ttk.Progressbar(frame, length=360, mode="determinate")
-    progress.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 6))
-    ttk.Label(frame, textvariable=status_var).grid(row=7, column=0, columnspan=2, sticky="w")
+    progress.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+    ttk.Label(frame, textvariable=status_var).grid(row=9, column=0, columnspan=2, sticky="w")
 
     start_button = ttk.Button(frame, text="Generate storyboard PDF from video", command=start)
-    start_button.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+    start_button.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
     controls = [
         video_entry,
@@ -502,6 +554,10 @@ def launch_ui() -> int:
         output_entry,
         output_button,
         max_len_entry,
+        min_scene_len_entry,
+        adaptive_threshold_entry,
+        min_content_val_entry,
+        capture_position_entry,
         n_cols_entry,
         n_rows_entry,
         cell_width_entry,
@@ -533,6 +589,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         help="Maximum length of video to process, in seconds. By default, the entire video is processed.",
     )
+    parser.add_argument(
+        "--min_scene_len",
+        type=float,
+        default=MIN_SCENE_LEN_SEC,
+        help="Minimum scene length in seconds.",
+    )
+    parser.add_argument(
+        "--adaptive_threshold",
+        type=float,
+        default=ADAPTIVE_THRESHOLD,
+        help="Adaptive detector sensitivity threshold.",
+    )
+    parser.add_argument(
+        "--min_content_val",
+        type=float,
+        default=MIN_CONTENT_VAL,
+        help="Minimum content score required to count as a cut.",
+    )
+    parser.add_argument(
+        "--capture_position",
+        type=float,
+        default=CAPTURE_POSITION,
+        help="Where to pick the screenshot inside the safe scene window: 0=start, 1=end.",
+    )
     parser.add_argument("--n_cols", type=int, default=DEFAULT_N_COLS, help="Images per row.")
     parser.add_argument("--n_rows", type=int, default=DEFAULT_N_ROWS, help="Rows per PDF page.")
     parser.add_argument(
@@ -550,6 +630,10 @@ def run_cli(args: argparse.Namespace) -> int:
             args.video,
             args.output,
             max_len=args.max_len,
+            min_scene_len=args.min_scene_len,
+            adaptive_threshold=args.adaptive_threshold,
+            min_content_val=args.min_content_val,
+            capture_position=args.capture_position,
             n_cols=args.n_cols,
             n_rows=args.n_rows,
             cell_width=args.cell_width,
