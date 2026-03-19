@@ -1,0 +1,5 @@
+opencv-python
+numpy
+scenedetect
+tqdm
+img2pdf
